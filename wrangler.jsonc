@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-11",
+   "vars": {
+    "RESEND_API_KEY": "re_3WU7UbGM_Esar3wsqHRzHNts5pJ3ffmWQ"
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aframebuilders",
+      "database_id": "4738ff0f-8ca4-4199-8a82-ffa633c6378c",
+      "remote": true
+    }
+  ],
+
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "aframebuilders",
+      "remote": true
+    }
+  ]
+
+ 
+
+}
