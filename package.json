@@ -4,7 +4,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "d1:seed": "wrangler d1 execute aframebuilders --file=./seed.sql",
+    "d1:seed:remote": "wrangler d1 execute aframebuilders --remote --file=./seed.sql"
   },
   "dependencies": {
     "hono": "^4.13.1",

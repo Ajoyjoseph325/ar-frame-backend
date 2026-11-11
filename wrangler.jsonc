@@ -3,10 +3,9 @@
   "name": "my-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-11",
-   "vars": {
-    "RESEND_API_KEY": "re_3WU7UbGM_Esar3wsqHRzHNts5pJ3ffmWQ"
+  "vars": {
+    "RESEND_API_KEY": "re_QUUymFmG_7f7JL3SniP1VrMa4uFuZFaFs"
   },
-
   "d1_databases": [
     {
       "binding": "DB",
@@ -15,7 +14,6 @@
       "remote": true
     }
   ],
-
   "r2_buckets": [
     {
       "binding": "BUCKET",
@@ -23,7 +21,4 @@
       "remote": true
     }
   ]
-
- 
-
 }

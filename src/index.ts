@@ -1694,7 +1694,7 @@ app.post('/api/contact', async (c) => {
         from: 'AFrame Builders <onboarding@resend.dev>',
 
         // Your email where enquiries should arrive
-        to: ['ajoyjohnm@gmail.com'],
+        to: ['aframebuilders.ind@gmail.com'],
 
         subject: `New Enquiry: ${subject}`,
 
@@ -1745,4 +1745,979 @@ ${message}
 
 
 
-export default app
+// =====================================================
+// BEFORE & AFTER (TRANSFORMATIONS)
+// =====================================================
+
+async function ensureBeforeAfterTable(db: D1Database) {
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS before_after (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Home Renovation',
+        location TEXT,
+        year TEXT,
+        before_image TEXT NOT NULL,
+        after_image TEXT NOT NULL,
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+  } catch (e) {
+    console.warn('ensureBeforeAfterTable warning:', e);
+  }
+}
+
+// GET /api/before-after
+app.get('/api/before-after', async (c) => {
+  try {
+    await ensureBeforeAfterTable(c.env.DB);
+    const pageParam = c.req.query('page');
+    const limitParam = c.req.query('limit');
+
+    if (!pageParam && !limitParam) {
+      const result = await c.env.DB
+        .prepare('SELECT * FROM before_after ORDER BY display_order ASC, id DESC')
+        .all();
+      return c.json({
+        success: true,
+        data: result.results || [],
+        total: result.results ? result.results.length : 0,
+      });
+    }
+
+    const page = Math.max(Number(pageParam) || 1, 1);
+    const requestedLimit = Number(limitParam) || 10;
+    const limit = Math.min(Math.max(requestedLimit, 1), 100);
+    const offset = (page - 1) * limit;
+
+    const countResult = await c.env.DB
+      .prepare('SELECT COUNT(*) AS total FROM before_after')
+      .first<{ total: number }>();
+    const total = countResult?.total ?? 0;
+    const totalPages = Math.ceil(total / limit);
+
+    const result = await c.env.DB
+      .prepare('SELECT * FROM before_after ORDER BY display_order ASC, id DESC LIMIT ? OFFSET ?')
+      .bind(limit, offset)
+      .all();
+
+    return c.json({
+      success: true,
+      page,
+      limit,
+      total,
+      totalPages,
+      data: result.results || [],
+    });
+  } catch (error) {
+    console.error('GET BEFORE_AFTER ERROR:', error);
+    return c.json({ error: 'Failed to fetch transformations' }, 500);
+  }
+});
+
+// GET /api/before-after/:id
+app.get('/api/before-after/:id', async (c) => {
+  try {
+    await ensureBeforeAfterTable(c.env.DB);
+    const id = c.req.param('id');
+    const item = await c.env.DB
+      .prepare('SELECT * FROM before_after WHERE id = ?')
+      .bind(id)
+      .first();
+
+    if (!item) {
+      return c.json({ error: 'Transformation not found' }, 404);
+    }
+
+    return c.json({ success: true, data: item });
+  } catch (error) {
+    console.error('GET BEFORE_AFTER BY ID ERROR:', error);
+    return c.json({ error: 'Failed to fetch transformation' }, 500);
+  }
+});
+
+// POST /api/before-after
+app.post('/api/before-after', async (c) => {
+  try {
+    await ensureBeforeAfterTable(c.env.DB);
+    const body = await c.req.parseBody();
+
+    const title = body['title'];
+    const category = body['category'] || 'Home Renovation';
+    const location = body['location'] || '';
+    const year = body['year'] || new Date().getFullYear().toString();
+    const beforeImage = body['before_image'];
+    const afterImage = body['after_image'];
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return c.json({ error: 'title is required' }, 400);
+    }
+
+    if (!(beforeImage instanceof File) || beforeImage.size === 0) {
+      return c.json({ error: 'Before image is required' }, 400);
+    }
+
+    if (!(afterImage instanceof File) || afterImage.size === 0) {
+      return c.json({ error: 'After image is required' }, 400);
+    }
+
+    const getExtension = (file: File) => {
+      const originalName = file.name || 'image.webp';
+      return originalName.includes('.')
+        ? originalName.split('.').pop()?.toLowerCase() || 'webp'
+        : 'webp';
+    };
+
+    const timestamp = Date.now();
+    const rand = Math.random().toString(36).substring(2, 7);
+    const beforeKey = `beforeandafter/before_${timestamp}_${rand}.${getExtension(beforeImage)}`;
+    const afterKey = `beforeandafter/after_${timestamp}_${rand}.${getExtension(afterImage)}`;
+
+    // Upload to R2 in 'beforeandafter' folder
+    await c.env.BUCKET.put(beforeKey, beforeImage.stream(), {
+      httpMetadata: { contentType: beforeImage.type || 'image/jpeg' },
+    });
+
+    await c.env.BUCKET.put(afterKey, afterImage.stream(), {
+      httpMetadata: { contentType: afterImage.type || 'image/jpeg' },
+    });
+
+    // Insert into D1
+    const result = await c.env.DB
+      .prepare(`
+        INSERT INTO before_after (title, category, location, year, before_image, after_image)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        String(title).trim(),
+        String(category).trim(),
+        String(location).trim(),
+        String(year).trim(),
+        beforeKey,
+        afterKey
+      )
+      .run();
+
+    const newId = result.meta.last_row_id;
+    return c.json({
+      success: true,
+      message: 'Transformation created successfully',
+      data: {
+        id: newId,
+        title: String(title).trim(),
+        category: String(category).trim(),
+        location: String(location).trim(),
+        year: String(year).trim(),
+        before_image: beforeKey,
+        after_image: afterKey,
+      }
+    }, 201);
+  } catch (error) {
+    console.error('CREATE BEFORE_AFTER ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// PUT /api/before-after/:id
+app.put('/api/before-after/:id', async (c) => {
+  try {
+    await ensureBeforeAfterTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM before_after WHERE id = ?')
+      .bind(id)
+      .first<{
+        id: number;
+        title: string;
+        category: string;
+        location: string;
+        year: string;
+        before_image: string;
+        after_image: string;
+      }>();
+
+    if (!existing) {
+      return c.json({ error: 'Transformation not found' }, 404);
+    }
+
+    const body = await c.req.parseBody();
+    const title = body['title'] !== undefined ? String(body['title']).trim() : existing.title;
+    const category = body['category'] !== undefined ? String(body['category']).trim() : existing.category;
+    const location = body['location'] !== undefined ? String(body['location']).trim() : existing.location;
+    const year = body['year'] !== undefined ? String(body['year']).trim() : existing.year;
+    const beforeImage = body['before_image'];
+    const afterImage = body['after_image'];
+
+    let finalBeforeKey = existing.before_image;
+    let finalAfterKey = existing.after_image;
+
+    const getExtension = (file: File) => {
+      const originalName = file.name || 'image.webp';
+      return originalName.includes('.')
+        ? originalName.split('.').pop()?.toLowerCase() || 'webp'
+        : 'webp';
+    };
+
+    const timestamp = Date.now();
+    const rand = Math.random().toString(36).substring(2, 7);
+
+    // If new before image uploaded
+    if (beforeImage instanceof File && beforeImage.size > 0) {
+      const newBeforeKey = `beforeandafter/before_${timestamp}_${rand}.${getExtension(beforeImage)}`;
+      await c.env.BUCKET.put(newBeforeKey, beforeImage.stream(), {
+        httpMetadata: { contentType: beforeImage.type || 'image/jpeg' },
+      });
+
+      // Delete old R2 key if it's in beforeandafter folder
+      if (existing.before_image && existing.before_image.startsWith('beforeandafter/')) {
+        try {
+          await c.env.BUCKET.delete(existing.before_image);
+        } catch (err) {
+          console.warn('R2 DELETE OLD BEFORE IMAGE WARNING:', err);
+        }
+      }
+      finalBeforeKey = newBeforeKey;
+    }
+
+    // If new after image uploaded
+    if (afterImage instanceof File && afterImage.size > 0) {
+      const newAfterKey = `beforeandafter/after_${timestamp}_${rand}.${getExtension(afterImage)}`;
+      await c.env.BUCKET.put(newAfterKey, afterImage.stream(), {
+        httpMetadata: { contentType: afterImage.type || 'image/jpeg' },
+      });
+
+      // Delete old R2 key if it's in beforeandafter folder
+      if (existing.after_image && existing.after_image.startsWith('beforeandafter/')) {
+        try {
+          await c.env.BUCKET.delete(existing.after_image);
+        } catch (err) {
+          console.warn('R2 DELETE OLD AFTER IMAGE WARNING:', err);
+        }
+      }
+      finalAfterKey = newAfterKey;
+    }
+
+    await c.env.DB
+      .prepare(`
+        UPDATE before_after
+        SET title = ?, category = ?, location = ?, year = ?, before_image = ?, after_image = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(title, category, location, year, finalBeforeKey, finalAfterKey, id)
+      .run();
+
+    return c.json({
+      success: true,
+      message: 'Transformation updated successfully',
+      data: {
+        id,
+        title,
+        category,
+        location,
+        year,
+        before_image: finalBeforeKey,
+        after_image: finalAfterKey,
+      }
+    });
+  } catch (error) {
+    console.error('UPDATE BEFORE_AFTER ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// DELETE /api/before-after/:id
+app.delete('/api/before-after/:id', async (c) => {
+  try {
+    await ensureBeforeAfterTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM before_after WHERE id = ?')
+      .bind(id)
+      .first<{
+        id: number;
+        before_image: string;
+        after_image: string;
+      }>();
+
+    if (!existing) {
+      return c.json({ error: 'Transformation not found' }, 404);
+    }
+
+    if (existing.before_image && existing.before_image.startsWith('beforeandafter/')) {
+      try {
+        await c.env.BUCKET.delete(existing.before_image);
+      } catch (err) {
+        console.warn('R2 DELETE BEFORE IMAGE WARNING:', err);
+      }
+    }
+
+    if (existing.after_image && existing.after_image.startsWith('beforeandafter/')) {
+      try {
+        await c.env.BUCKET.delete(existing.after_image);
+      } catch (err) {
+        console.warn('R2 DELETE AFTER IMAGE WARNING:', err);
+      }
+    }
+
+    await c.env.DB.prepare('DELETE FROM before_after WHERE id = ?').bind(id).run();
+    return c.json({ success: true, message: 'Transformation deleted successfully' });
+  } catch (error) {
+    console.error('DELETE BEFORE_AFTER ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// =====================================================
+// PROPOSED AND ONGOING PROJECTS
+// =====================================================
+
+async function ensureProposedProjectsTable(db: D1Database) {
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS proposed_projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        subtitle TEXT,
+        image TEXT NOT NULL,
+        gallery TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+
+    // Auto-migrate if table existed previously without the new columns
+    const columns = ['subtitle TEXT', 'gallery TEXT'];
+    for (const col of columns) {
+      try {
+        await db.prepare(`ALTER TABLE proposed_projects ADD COLUMN ${col}`).run();
+      } catch (_) {
+        // Column already exists, safe to ignore
+      }
+    }
+  } catch (e) {
+    console.warn('ensureProposedProjectsTable warning:', e);
+  }
+}
+
+// GET /api/proposed-projects
+app.get('/api/proposed-projects', async (c) => {
+  try {
+    await ensureProposedProjectsTable(c.env.DB);
+    const result = await c.env.DB
+      .prepare('SELECT * FROM proposed_projects ORDER BY id ASC')
+      .all<{
+        id: number;
+        title: string;
+        subtitle: string | null;
+        image: string;
+        gallery: string | null;
+        created_at: string;
+        updated_at: string;
+      }>();
+
+    const mapped = (result.results || []).map((row) => ({
+      ...row,
+      gallery: parseImagesArray(row.gallery, row.image),
+    }));
+
+    return c.json({
+      success: true,
+      data: mapped,
+    });
+  } catch (error) {
+    console.error('GET PROPOSED_PROJECTS ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// GET /api/proposed-projects/:id
+app.get('/api/proposed-projects/:id', async (c) => {
+  try {
+    await ensureProposedProjectsTable(c.env.DB);
+    const id = c.req.param('id');
+    const project = await c.env.DB
+      .prepare('SELECT * FROM proposed_projects WHERE id = ?')
+      .bind(id)
+      .first<{
+        id: number;
+        title: string;
+        subtitle: string | null;
+        image: string;
+        gallery: string | null;
+        created_at: string;
+        updated_at: string;
+      }>();
+
+    if (!project) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        ...project,
+        gallery: parseImagesArray(project.gallery, project.image),
+      },
+    });
+  } catch (error) {
+    console.error('GET SINGLE PROPOSED_PROJECT ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// POST /api/proposed-projects
+app.post('/api/proposed-projects', async (c) => {
+  try {
+    await ensureProposedProjectsTable(c.env.DB);
+    const body = await c.req.parseBody({ all: true });
+
+    const title = body['title'];
+    const subtitle = body['subtitle'] ? String(body['subtitle']).trim() : null;
+    const imageFile = body['image'];
+    const imageUrl = body['imageUrl'] || body['image_url'];
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return c.json({ error: 'Title is required' }, 400);
+    }
+
+    const getExtension = (file: File) => {
+      const originalName = file.name || 'image.webp';
+      return originalName.includes('.')
+        ? originalName.split('.').pop()?.toLowerCase() || 'webp'
+        : 'webp';
+    };
+
+    let finalCoverImage = '';
+
+    if (imageFile instanceof File && imageFile.size > 0) {
+      const timestamp = Date.now();
+      const rand = Math.random().toString(36).substring(2, 7);
+      const imageKey = `proposed/cover_${timestamp}_${rand}.${getExtension(imageFile)}`;
+
+      await c.env.BUCKET.put(imageKey, imageFile.stream(), {
+        httpMetadata: { contentType: imageFile.type || 'image/jpeg' },
+      });
+
+      finalCoverImage = imageKey;
+    } else if (typeof imageUrl === 'string' && imageUrl.trim()) {
+      finalCoverImage = imageUrl.trim();
+    }
+
+    // Process Gallery
+    const existingGalleryKeys = [
+      ...parseArrayField<string>(body['keep_gallery']),
+      ...parseArrayField<string>(body['existing_gallery']),
+    ].filter((k) => typeof k === 'string' && k.trim().length > 0);
+
+    const rawGalleryFiles = [
+      ...parseArrayField(body['gallery_files']),
+      ...parseArrayField(body['gallery']),
+    ];
+    const validGalleryFiles = rawGalleryFiles.filter(
+      (f): f is File => f instanceof File && f.size > 0
+    );
+
+    const uploadGalleryPromises = validGalleryFiles.map(async (file, idx) => {
+      const timestamp = Date.now();
+      const rand = Math.random().toString(36).substring(2, 7);
+      const ext = getExtension(file);
+      const key = `proposed/gallery_${timestamp}_${idx}_${rand}.${ext}`;
+      await c.env.BUCKET.put(key, file.stream(), {
+        httpMetadata: { contentType: file.type || 'image/jpeg' },
+      });
+      return key;
+    });
+
+    const newlyUploadedGalleryKeys = await Promise.all(uploadGalleryPromises);
+
+    if (!finalCoverImage) {
+      if (newlyUploadedGalleryKeys.length > 0) {
+        finalCoverImage = newlyUploadedGalleryKeys[0];
+      } else if (existingGalleryKeys.length > 0) {
+        finalCoverImage = existingGalleryKeys[0];
+      } else {
+        return c.json({ error: 'At least a cover photo or gallery photo is required' }, 400);
+      }
+    }
+
+    let finalGallery = [...existingGalleryKeys, ...newlyUploadedGalleryKeys];
+    if (finalGallery.length === 0) {
+      finalGallery = [finalCoverImage];
+    }
+
+    const galleryJson = JSON.stringify(finalGallery);
+
+    const result = await c.env.DB
+      .prepare(`
+        INSERT INTO proposed_projects (title, subtitle, image, gallery)
+        VALUES (?, ?, ?, ?)
+      `)
+      .bind(
+        String(title).trim(),
+        subtitle,
+        finalCoverImage,
+        galleryJson
+      )
+      .run();
+
+    const newId = result.meta.last_row_id;
+    return c.json({
+      success: true,
+      message: 'Proposed project created successfully',
+      data: {
+        id: newId,
+        title: String(title).trim(),
+        subtitle,
+        image: finalCoverImage,
+        gallery: finalGallery,
+      },
+    }, 201);
+  } catch (error) {
+    console.error('CREATE PROPOSED_PROJECT ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// PUT /api/proposed-projects/:id
+app.put('/api/proposed-projects/:id', async (c) => {
+  try {
+    await ensureProposedProjectsTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM proposed_projects WHERE id = ?')
+      .bind(id)
+      .first<{
+        id: number;
+        title: string;
+        subtitle: string | null;
+        image: string;
+        gallery: string | null;
+      }>();
+
+    if (!existing) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const body = await c.req.parseBody({ all: true });
+    const title = body['title'] !== undefined ? String(body['title']).trim() : existing.title;
+    const subtitle = body['subtitle'] !== undefined ? String(body['subtitle']).trim() : existing.subtitle;
+
+    const imageFile = body['image'];
+    const imageUrl = body['imageUrl'] || body['image_url'];
+
+    const getExtension = (file: File) => {
+      const originalName = file.name || 'image.webp';
+      return originalName.includes('.')
+        ? originalName.split('.').pop()?.toLowerCase() || 'webp'
+        : 'webp';
+    };
+
+    let finalCoverImage = existing.image;
+    let oldCoverToDelete: string | null = null;
+
+    if (imageFile instanceof File && imageFile.size > 0) {
+      const timestamp = Date.now();
+      const rand = Math.random().toString(36).substring(2, 7);
+      const newKey = `proposed/cover_${timestamp}_${rand}.${getExtension(imageFile)}`;
+
+      await c.env.BUCKET.put(newKey, imageFile.stream(), {
+        httpMetadata: { contentType: imageFile.type || 'image/jpeg' },
+      });
+
+      if (existing.image && existing.image.startsWith('proposed/')) {
+        oldCoverToDelete = existing.image;
+      }
+      finalCoverImage = newKey;
+    } else if (typeof imageUrl === 'string' && imageUrl.trim()) {
+      finalCoverImage = imageUrl.trim();
+    }
+
+    // Process Gallery
+    const rawKeep = [
+      ...parseArrayField<string>(body['keep_gallery']),
+      ...parseArrayField<string>(body['existing_gallery']),
+    ];
+
+    const hasGalleryParam = 'keep_gallery' in body || 'existing_gallery' in body || 'gallery_files' in body || 'gallery' in body;
+    let keptGalleryKeys: string[] = [];
+
+    if (hasGalleryParam) {
+      keptGalleryKeys = rawKeep.filter((k) => typeof k === 'string' && k.trim().length > 0);
+    } else {
+      keptGalleryKeys = parseImagesArray(existing.gallery, existing.image);
+    }
+
+    const rawGalleryFiles = [
+      ...parseArrayField(body['gallery_files']),
+      ...parseArrayField(body['gallery']),
+    ];
+    const validGalleryFiles = rawGalleryFiles.filter(
+      (f): f is File => f instanceof File && f.size > 0
+    );
+
+    const uploadGalleryPromises = validGalleryFiles.map(async (file, idx) => {
+      const timestamp = Date.now();
+      const rand = Math.random().toString(36).substring(2, 7);
+      const ext = getExtension(file);
+      const key = `proposed/gallery_${timestamp}_${idx}_${rand}.${ext}`;
+      await c.env.BUCKET.put(key, file.stream(), {
+        httpMetadata: { contentType: file.type || 'image/jpeg' },
+      });
+      return key;
+    });
+
+    const newlyUploadedGalleryKeys = await Promise.all(uploadGalleryPromises);
+
+    let finalGallery = [...keptGalleryKeys, ...newlyUploadedGalleryKeys];
+    if (finalGallery.length === 0) {
+      finalGallery = [finalCoverImage];
+    }
+
+    // Delete any old R2 files that were removed
+    const oldGalleryKeys = parseImagesArray(existing.gallery, existing.image);
+    const keysToDelete = oldGalleryKeys.filter(
+      (oldKey) =>
+        oldKey.startsWith('proposed/') &&
+        !finalGallery.includes(oldKey) &&
+        oldKey !== finalCoverImage
+    );
+
+    if (oldCoverToDelete && !finalGallery.includes(oldCoverToDelete)) {
+      keysToDelete.push(oldCoverToDelete);
+    }
+
+    for (const key of keysToDelete) {
+      try {
+        await c.env.BUCKET.delete(key);
+      } catch (err) {
+        console.warn('R2 DELETE OLD PROPOSED IMAGE WARNING:', err);
+      }
+    }
+
+    const galleryJson = JSON.stringify(finalGallery);
+
+    await c.env.DB
+      .prepare(`
+        UPDATE proposed_projects
+        SET title = ?, subtitle = ?, image = ?, gallery = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(title, subtitle, finalCoverImage, galleryJson, id)
+      .run();
+
+    return c.json({
+      success: true,
+      message: 'Proposed project updated successfully',
+      data: {
+        id,
+        title,
+        subtitle,
+        image: finalCoverImage,
+        gallery: finalGallery,
+      },
+    });
+  } catch (error) {
+    console.error('UPDATE PROPOSED_PROJECT ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// DELETE /api/proposed-projects/:id
+app.delete('/api/proposed-projects/:id', async (c) => {
+  try {
+    await ensureProposedProjectsTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM proposed_projects WHERE id = ?')
+      .bind(id)
+      .first<{ id: number; image: string; gallery: string | null }>();
+
+    if (!existing) {
+      return c.json({ error: 'Project not found' }, 404);
+    }
+
+    const allKeys = [
+      existing.image,
+      ...parseImagesArray(existing.gallery, existing.image),
+    ];
+    const uniqueKeys = Array.from(new Set(allKeys)).filter(
+      (k) => typeof k === 'string' && k.startsWith('proposed/')
+    );
+
+    for (const key of uniqueKeys) {
+      try {
+        await c.env.BUCKET.delete(key);
+      } catch (err) {
+        console.warn('R2 DELETE IMAGE WARNING:', err);
+      }
+    }
+
+    await c.env.DB.prepare('DELETE FROM proposed_projects WHERE id = ?').bind(id).run();
+    return c.json({ success: true, message: 'Proposed project deleted successfully' });
+  } catch (error) {
+    console.error('DELETE PROPOSED_PROJECT ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// =====================================================
+// GALLERY SHOWCASE API ENDPOINTS
+// =====================================================
+
+async function ensureGalleryTable(db: D1Database) {
+  try {
+    await db.prepare(`
+      CREATE TABLE IF NOT EXISTS gallery (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Architecture',
+        image TEXT NOT NULL,
+        aspect TEXT DEFAULT 'tall',
+        display_order INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+  } catch (e) {
+    console.warn('ensureGalleryTable warning:', e);
+  }
+}
+
+// GET /api/gallery (supports optional ?category=Architecture)
+app.get('/api/gallery', async (c) => {
+  try {
+    await ensureGalleryTable(c.env.DB);
+    const category = c.req.query('category');
+
+    let query = 'SELECT * FROM gallery';
+    let params: any[] = [];
+
+    if (category && category !== 'All') {
+      query += ' WHERE category = ?';
+      params.push(category);
+    }
+
+    query += ' ORDER BY display_order ASC, id DESC';
+
+    const stmt = params.length > 0 ? c.env.DB.prepare(query).bind(...params) : c.env.DB.prepare(query);
+    const result = await stmt.all();
+
+    return c.json({
+      success: true,
+      data: result.results || [],
+    });
+  } catch (error) {
+    console.error('GET GALLERY ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// GET /api/gallery/:id
+app.get('/api/gallery/:id', async (c) => {
+  try {
+    await ensureGalleryTable(c.env.DB);
+    const id = c.req.param('id');
+    const item = await c.env.DB
+      .prepare('SELECT * FROM gallery WHERE id = ?')
+      .bind(id)
+      .first();
+
+    if (!item) {
+      return c.json({ error: 'Gallery item not found' }, 404);
+    }
+
+    return c.json({ success: true, data: item });
+  } catch (error) {
+    console.error('GET SINGLE GALLERY ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// POST /api/gallery (Multipart / Form-data or JSON)
+app.post('/api/gallery', async (c) => {
+  try {
+    await ensureGalleryTable(c.env.DB);
+    const body = await c.req.parseBody();
+
+    const title = body['title'];
+    const category = body['category'] || 'Architecture';
+    const aspect = body['aspect'] || 'tall';
+    const displayOrder = parseInt(String(body['display_order'] || '0'), 10) || 0;
+    const imageFile = body['image'];
+    const imageUrl = body['imageUrl'] || body['image_url'];
+
+    if (!title || typeof title !== 'string' || !title.trim()) {
+      return c.json({ error: 'Title is required' }, 400);
+    }
+
+    let finalImage = '';
+
+    if (imageFile instanceof File && imageFile.size > 0) {
+      const getExtension = (file: File) => {
+        const originalName = file.name || 'image.webp';
+        const parts = originalName.split('.');
+        return parts.length > 1 ? parts.pop()!.toLowerCase() : 'webp';
+      };
+
+      const ext = getExtension(imageFile);
+      const randomSuffix = Math.random().toString(36).substring(2, 7);
+      const key = `gallery/gallery_${Date.now()}_${randomSuffix}.${ext}`;
+
+      const arrayBuffer = await imageFile.arrayBuffer();
+      await c.env.BUCKET.put(key, arrayBuffer, {
+        httpMetadata: {
+          contentType: imageFile.type || 'image/jpeg',
+        },
+      });
+
+      finalImage = key;
+    } else if (imageUrl && typeof imageUrl === 'string' && imageUrl.trim()) {
+      finalImage = imageUrl.trim();
+    } else {
+      return c.json({ error: 'An image file or valid image URL is required' }, 400);
+    }
+
+    const insertResult = await c.env.DB
+      .prepare(`
+        INSERT INTO gallery (title, category, image, aspect, display_order)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .bind(title.trim(), category, finalImage, aspect, displayOrder)
+      .run();
+
+    return c.json({
+      success: true,
+      message: 'Gallery item created successfully',
+      data: {
+        id: insertResult.meta?.last_row_id,
+        title: title.trim(),
+        category,
+        image: finalImage,
+        aspect,
+        display_order: displayOrder,
+      },
+    }, 201);
+  } catch (error) {
+    console.error('CREATE GALLERY ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// PUT /api/gallery/:id
+app.put('/api/gallery/:id', async (c) => {
+  try {
+    await ensureGalleryTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM gallery WHERE id = ?')
+      .bind(id)
+      .first<{ id: number; title: string; category: string; image: string; aspect: string; display_order: number }>();
+
+    if (!existing) {
+      return c.json({ error: 'Gallery item not found' }, 404);
+    }
+
+    const body = await c.req.parseBody();
+    const title = typeof body['title'] === 'string' && body['title'].trim() ? body['title'].trim() : existing.title;
+    const category = typeof body['category'] === 'string' && body['category'].trim() ? body['category'].trim() : existing.category;
+    const aspect = typeof body['aspect'] === 'string' && body['aspect'].trim() ? body['aspect'].trim() : existing.aspect;
+    const displayOrder = body['display_order'] !== undefined ? parseInt(String(body['display_order']), 10) : existing.display_order;
+
+    const imageFile = body['image'];
+    const imageUrl = body['imageUrl'] || body['image_url'];
+
+    let finalImage = existing.image;
+
+    if (imageFile instanceof File && imageFile.size > 0) {
+      const getExtension = (file: File) => {
+        const originalName = file.name || 'image.webp';
+        const parts = originalName.split('.');
+        return parts.length > 1 ? parts.pop()!.toLowerCase() : 'webp';
+      };
+
+      const ext = getExtension(imageFile);
+      const randomSuffix = Math.random().toString(36).substring(2, 7);
+      const key = `gallery/gallery_${Date.now()}_${randomSuffix}.${ext}`;
+
+      const arrayBuffer = await imageFile.arrayBuffer();
+      await c.env.BUCKET.put(key, arrayBuffer, {
+        httpMetadata: {
+          contentType: imageFile.type || 'image/jpeg',
+        },
+      });
+
+      if (existing.image && existing.image.startsWith('gallery/')) {
+        try {
+          await c.env.BUCKET.delete(existing.image);
+        } catch (err) {
+          console.warn('R2 DELETE PREVIOUS IMAGE WARNING:', err);
+        }
+      }
+
+      finalImage = key;
+    } else if (imageUrl && typeof imageUrl === 'string' && imageUrl.trim()) {
+      finalImage = imageUrl.trim();
+    }
+
+    await c.env.DB
+      .prepare(`
+        UPDATE gallery
+        SET title = ?, category = ?, image = ?, aspect = ?, display_order = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      .bind(title, category, finalImage, aspect, displayOrder, id)
+      .run();
+
+    return c.json({
+      success: true,
+      message: 'Gallery item updated successfully',
+      data: {
+        id,
+        title,
+        category,
+        image: finalImage,
+        aspect,
+        display_order: displayOrder,
+      },
+    });
+  } catch (error) {
+    console.error('UPDATE GALLERY ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+// DELETE /api/gallery/:id
+app.delete('/api/gallery/:id', async (c) => {
+  try {
+    await ensureGalleryTable(c.env.DB);
+    const id = c.req.param('id');
+    const existing = await c.env.DB
+      .prepare('SELECT * FROM gallery WHERE id = ?')
+      .bind(id)
+      .first<{ id: number; image: string }>();
+
+    if (!existing) {
+      return c.json({ error: 'Gallery item not found' }, 404);
+    }
+
+    if (existing.image && existing.image.startsWith('gallery/')) {
+      try {
+        await c.env.BUCKET.delete(existing.image);
+      } catch (err) {
+        console.warn('R2 DELETE IMAGE WARNING:', err);
+      }
+    }
+
+    await c.env.DB.prepare('DELETE FROM gallery WHERE id = ?').bind(id).run();
+    return c.json({ success: true, message: 'Gallery item deleted successfully' });
+  } catch (error) {
+    console.error('DELETE GALLERY ERROR:', error);
+    return c.json({ error: String(error) }, 500);
+  }
+});
+
+export default app;
+
